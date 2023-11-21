@@ -4,3 +4,4 @@ logs
 bakcup/action.pyt
 *.json
 *.jsonl
+qwen_exmaples/train2.jsonl
