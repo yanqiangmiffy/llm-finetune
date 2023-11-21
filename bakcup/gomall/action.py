@@ -13,6 +13,7 @@ import copy
 import datetime
 import logging
 import os
+import loguru
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Optional, Tuple, List, Dict, Sequence
@@ -27,10 +28,12 @@ from torch.utils.data import Dataset
 from transformers import DataCollatorForSeq2Seq
 from transformers import Trainer
 
+output_path = os.environ.get('OUTPUT_PATH', '/workspace/output')
+os.makedirs(output_path,exist_ok=True)
 logging.basicConfig(
     format='%(asctime)s - %(filename)s[line:%(lineno)d] - %(levelname)s: %(message)s',
     level=logging.INFO,
-    filename='train.log',
+    filename=f'{output_path}/train.log',
     filemode='a'
 )
 logger = logging.getLogger(__name__)
@@ -210,7 +213,11 @@ def set_args(
             metadata={
                 "help": "生成模型的目录"},
         )
-
+        peft_path: Optional[str] = field(
+            default=None,
+            metadata={
+                "help": "Lora权重路径"},
+        )
         target_modules: Optional[str] = field(default="all")
         lora_rank: Optional[int] = field(default=8)
         lora_dropout: Optional[float] = field(default=0.05)
@@ -359,7 +366,8 @@ def run_task(
     :param split_ratio: 数据集比例
     :return:
     """
-    os.makedirs('/workspace/output',exist_ok=True)
+    log_path = os.environ.get('LOG_PATH',"/workspace/output")
+    os.makedirs(log_path,exist_ok=True)
     try:
         model_args, data_args, training_args = set_args(
             model_name_or_path=model_name_or_path,
@@ -375,7 +383,7 @@ def run_task(
         logger.info(model_args)
         logger.info(data_args)
         logger.info(training_args)
-        log0 = log.AutoLog(name=log_path)
+        log0 = log.AutoLog(path=log_path)
         log0.log_hyper(
             lora_rank=training_args.lora_rank,
             model_name_or_path=model_name_or_path,
@@ -392,21 +400,23 @@ def run_task(
         train(model_args, data_args, training_args)
         return {"running_status": "run task successfully", "message": "运行成功", "log_dir": log_path}
     except Exception as e:
+        loguru.logger.exception(e)
         return {"running_status": "run task faild", "message": e, "log_dir": log_path}
 
 
 if __name__ == "__main__":
     model_path = os.environ.get('MODEL_PATH', '/workspace/model')
     instruction_path = os.environ.get('INSTRUCTION_PATH', '/workspace/instructions')
-    output_path = os.environ.get('OUTPUT_PATH', '/workspace/output/finetuned_model')
+    output_path=f"{output_path}/finetuned_model"
     code_path = os.environ.get('CODE_PATH', '/workspace/code')
-    log_path = os.environ.get('LOG_PATH', '/workspace/output/logs')
+    log_path = os.environ.get('LOG_PATH', '/workspace/output')
+    log_path=f"{log_path}/logs"
     use_peft = os.environ.get('USE_PEFT', True)
     model_max_length = os.environ.get('MODEL_MAX_LENGTH', 4096)
     learning_rate = os.environ.get('LEARNING_RATE', 0.00003)
     epochs = os.environ.get('EPOCHS', 1)
     split_ratio = os.environ.get('SPLIT_RATIO', 20)
-    dara = run_task(
+    data = run_task(
         model_name_or_path=model_path,
         dataset_name_or_path=instruction_path,
         output_path=output_path,
@@ -416,4 +426,4 @@ if __name__ == "__main__":
         model_max_length=model_max_length,
         split_ratio=split_ratio
     )
-    print(dara)
+    print(data)
