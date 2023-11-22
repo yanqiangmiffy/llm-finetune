@@ -53,6 +53,7 @@ def load_dataset_from_path(data_path: Optional[str] = None,
                            cache_dir: Optional[str] = "cache_data") -> Dataset:
     all_file_list = get_all_datapath(data_path)
     all_file_list = [train_file for train_file in all_file_list if 'alpaca_style' in train_file]
+    all_file_list = [train_file for train_file in all_file_list if 'test' in train_file]
     logger.info(all_file_list)
     data_files = {'train': all_file_list}
     extension = all_file_list[0].split(".")[-1]
@@ -66,8 +67,32 @@ def load_dataset_from_path(data_path: Optional[str] = None,
     )['train']
     return raw_datasets
 
-
 IGNORE_INDEX = -100
+DEFAULT_PAD_TOKEN = "[PAD]"
+DEFAULT_EOS_TOKEN = "</s>"
+DEFAULT_BOS_TOKEN = "<s>"
+DEFAULT_UNK_TOKEN = "<unk>"
+def smart_tokenizer_and_embedding_resize(
+    special_tokens_dict: Dict,
+    tokenizer: transformers.PreTrainedTokenizer,
+    model: transformers.PreTrainedModel,
+):
+    """Resize tokenizer and embedding.
+
+    Note: This is the unoptimized version that may make your embedding size not be divisible by 64.
+    """
+    num_new_tokens = tokenizer.add_special_tokens(special_tokens_dict)
+    model.resize_token_embeddings(len(tokenizer))
+
+    if num_new_tokens > 0:
+        input_embeddings = model.get_input_embeddings().weight.data
+        output_embeddings = model.get_output_embeddings().weight.data
+
+        input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
+        output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
+
+        input_embeddings[-num_new_tokens:] = input_embeddings_avg
+        output_embeddings[-num_new_tokens:] = output_embeddings_avg
 PROMPT_DICT = {
     "prompt_input": (
         "Below is an instruction that describes a task, paired with an input that provides further context. "
@@ -165,6 +190,7 @@ def make_train_dataset(tokenizer: transformers.PreTrainedTokenizer, data_path: s
         desc="Running tokenizer on train dataset",
         num_proc=2
     ).shuffle()
+
     return dataset
 
 
@@ -211,15 +237,15 @@ def set_args(
         output_dir: Optional[str] = field(
             default="output",
             metadata={
-                "help": "生成模型的目录"},
+                "help": "outout_dir"},
         )
         peft_path: Optional[str] = field(
             default=None,
             metadata={
-                "help": "Lora权重路径"},
+                "help": "Lora dir"},
         )
         target_modules: Optional[str] = field(default="all")
-        lora_rank: Optional[int] = field(default=8)
+        lora_rank: Optional[int] = field(default=4)
         lora_dropout: Optional[float] = field(default=0.05)
         lora_alpha: Optional[float] = field(default=32.0)
         modules_to_save: Optional[str] = field(default=None)
@@ -231,9 +257,11 @@ def set_args(
     modelargs.use_peft = use_peft
     dataargs.data_path = dataset_name_or_path
     trainingargs.num_train_epochs = epochs
-    trainingargs.learning_rate = learning_rate
+    trainingargs.learning_rate = float(learning_rate)
     trainingargs.model_max_length = model_max_length
     trainingargs.output_dir = output_path
+    trainingargs.gradient_checkpointing = True
+    trainingargs.gradient_checkpointing = True
     trainingargs.per_device_train_batch_size = 1
     return modelargs, dataargs, trainingargs
 
@@ -264,9 +292,26 @@ def train(model_args, data_args, training_args):
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         device_map='auto',
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.float16,
         trust_remote_code=True if model_args.model_name_or_path.find("falcon") != -1 else False
 
+    )
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_args.model_name_or_path,use_fast=False)
+
+    special_tokens_dict = dict()
+    if tokenizer.pad_token is None:
+        special_tokens_dict["pad_token"] = DEFAULT_PAD_TOKEN
+    if tokenizer.eos_token is None:
+        special_tokens_dict["eos_token"] = DEFAULT_EOS_TOKEN
+    if tokenizer.bos_token is None:
+        special_tokens_dict["bos_token"] = DEFAULT_BOS_TOKEN
+    if tokenizer.unk_token is None:
+        special_tokens_dict["unk_token"] = DEFAULT_UNK_TOKEN
+
+    smart_tokenizer_and_embedding_resize(
+        special_tokens_dict=special_tokens_dict,
+        tokenizer=tokenizer,
+        model=model,
     )
     torch.cuda.empty_cache()
 
@@ -301,7 +346,7 @@ def train(model_args, data_args, training_args):
             logger.info(f"Peft lora_rank: {training_args.lora_rank}")
             peft_config = LoraConfig(
                 task_type=TaskType.CAUSAL_LM,
-                target_modules=target_modules,
+                target_modules=[ 'k_proj', 'q_proj','v_proj'],
                 inference_mode=False,
                 r=training_args.lora_rank,
                 lora_alpha=training_args.lora_alpha,
@@ -320,7 +365,8 @@ def train(model_args, data_args, training_args):
         model.config.use_cache = True
     model.enable_input_require_grads()
 
-    tokenizer = transformers.AutoTokenizer.from_pretrained(model_args.model_name_or_path)
+
+
     if model_args.model_name_or_path.find("falcon") != -1:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -412,7 +458,8 @@ if __name__ == "__main__":
     log_path = os.environ.get('LOG_PATH', '/workspace/output')
     log_path=f"{log_path}/logs"
     use_peft = os.environ.get('USE_PEFT', True)
-    model_max_length = os.environ.get('MODEL_MAX_LENGTH', 4096)
+    use_peft=True
+    model_max_length = os.environ.get('MODEL_MAX_LENGTH', 1024)
     learning_rate = os.environ.get('LEARNING_RATE', 0.00003)
     epochs = os.environ.get('EPOCHS', 1)
     split_ratio = os.environ.get('SPLIT_RATIO', 20)
@@ -422,7 +469,7 @@ if __name__ == "__main__":
         output_path=output_path,
         log_path=log_path,
         use_peft=use_peft,
-        learning_rate=learning_rate,
+        learning_rate=float(learning_rate),
         model_max_length=model_max_length,
         split_ratio=split_ratio
     )
